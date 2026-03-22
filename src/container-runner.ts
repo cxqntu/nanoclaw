@@ -6,6 +6,7 @@ import { ChildProcess, exec, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
+import { readEnvFile } from './env.js';
 import {
   CONTAINER_IMAGE,
   CONTAINER_MAX_OUTPUT_SIZE,
@@ -124,25 +125,42 @@ function buildVolumeMounts(
   fs.mkdirSync(groupSessionsDir, { recursive: true });
   const settingsFile = path.join(groupSessionsDir, 'settings.json');
   if (!fs.existsSync(settingsFile)) {
+    const agentConfig = readEnvFile([
+      'ANTHROPIC_AUTH_TOKEN',
+      'ANTHROPIC_BASE_URL',
+      'MODEL',
+    ]);
+    const envConfig: Record<string, string> = {
+      // Enable agent swarms (subagent orchestration)
+      // https://code.claude.com/docs/en/agent-teams#orchestrate-teams-of-claude-code-sessions
+      CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
+      // Load CLAUDE.md from additional mounted directories
+      // https://code.claude.com/docs/en/memory#load-memory-from-additional-directories
+      CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
+      // Enable Claude's memory feature (persists user preferences between sessions)
+      // https://code.claude.com/docs/en/memory#manage-auto-memory
+      CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
+    };
+
+    // Add optional agent config from .env
+    if (agentConfig.MODEL) {
+      envConfig.MODEL = agentConfig.MODEL;
+      envConfig.ANTHROPIC_DEFAULT_HAIKU_MODEL = agentConfig.MODEL;
+      envConfig.ANTHROPIC_DEFAULT_OPUS_MODEL = agentConfig.MODEL;
+      envConfig.ANTHROPIC_DEFAULT_SONNET_MODEL = agentConfig.MODEL;
+      envConfig.ANTHROPIC_MODEL = agentConfig.MODEL;
+      envConfig.ANTHROPIC_REASONING_MODEL = agentConfig.MODEL;
+    }
+    if (agentConfig.ANTHROPIC_AUTH_TOKEN) {
+      envConfig.ANTHROPIC_AUTH_TOKEN = agentConfig.ANTHROPIC_AUTH_TOKEN;
+    }
+    if (agentConfig.ANTHROPIC_BASE_URL) {
+      envConfig.ANTHROPIC_BASE_URL = agentConfig.ANTHROPIC_BASE_URL;
+    }
+
     fs.writeFileSync(
       settingsFile,
-      JSON.stringify(
-        {
-          env: {
-            // Enable agent swarms (subagent orchestration)
-            // https://code.claude.com/docs/en/agent-teams#orchestrate-teams-of-claude-code-sessions
-            CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
-            // Load CLAUDE.md from additional mounted directories
-            // https://code.claude.com/docs/en/memory#load-memory-from-additional-directories
-            CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
-            // Enable Claude's memory feature (persists user preferences between sessions)
-            // https://code.claude.com/docs/en/memory#manage-auto-memory
-            CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
-          },
-        },
-        null,
-        2,
-      ) + '\n',
+      JSON.stringify({ env: envConfig }, null, 2) + '\n',
     );
   }
 
