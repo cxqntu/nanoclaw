@@ -9,6 +9,7 @@ import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
+import { TelegramChannel } from './channels/telegram.js';
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
@@ -23,6 +24,12 @@ export interface IpcDeps {
     registeredJids: Set<string>,
   ) => void;
   onTasksChanged: () => void;
+  sendPoolMessage?: (
+    chatId: string,
+    text: string,
+    sender: string,
+    groupFolder: string,
+  ) => Promise<void>;
 }
 
 let ipcWatcherRunning = false;
@@ -81,11 +88,20 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   isMain ||
                   (targetGroup && targetGroup.folder === sourceGroup)
                 ) {
-                  await deps.sendMessage(data.chatJid, data.text);
-                  logger.info(
-                    { chatJid: data.chatJid, sourceGroup },
-                    'IPC message sent',
-                  );
+                  // Route Telegram swarm messages through bot pool
+                  if (data.sender && data.chatJid.startsWith('tg:') && deps.sendPoolMessage) {
+                    await deps.sendPoolMessage(data.chatJid, data.text, data.sender, sourceGroup);
+                    logger.info(
+                      { chatJid: data.chatJid, sourceGroup, sender: data.sender },
+                      'IPC pool message sent',
+                    );
+                  } else {
+                    await deps.sendMessage(data.chatJid, data.text);
+                    logger.info(
+                      { chatJid: data.chatJid, sourceGroup },
+                      'IPC message sent',
+                    );
+                  }
                 } else {
                   logger.warn(
                     { chatJid: data.chatJid, sourceGroup },

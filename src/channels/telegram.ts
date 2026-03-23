@@ -45,6 +45,11 @@ export class TelegramChannel implements Channel {
   name = 'telegram';
 
   private bot: Bot | null = null;
+  // Bot pool for agent teams: send-only Api instances (no polling)
+  private static poolApis: Api[] = [];
+  // Maps "{groupFolder}:{senderName}" → pool Api index for stable assignment
+  private static senderBotMap = new Map<string, number>();
+  private static nextPoolIndex = 0;
   private opts: TelegramChannelOpts;
   private botToken: string;
 
@@ -278,6 +283,79 @@ export class TelegramChannel implements Channel {
       this.bot.stop();
       this.bot = null;
       logger.info('Telegram bot stopped');
+    }
+  }
+
+  /**
+   * Initialize send-only Api instances for the bot pool.
+   * Each pool bot can send messages but doesn't poll for updates.
+   */
+  static async initBotPool(tokens: string[]): Promise<void> {
+    for (const token of tokens) {
+      try {
+        const api = new Api(token);
+        const me = await api.getMe();
+        TelegramChannel.poolApis.push(api);
+        logger.info(
+          { username: me.username, id: me.id, poolSize: TelegramChannel.poolApis.length },
+          'Pool bot initialized',
+        );
+      } catch (err) {
+        logger.error({ err }, 'Failed to initialize pool bot');
+      }
+    }
+    if (TelegramChannel.poolApis.length > 0) {
+      logger.info({ count: TelegramChannel.poolApis.length }, 'Telegram bot pool ready');
+    }
+  }
+
+  /**
+   * Send a message via a pool bot assigned to the given sender name.
+   * Assigns bots round-robin on first use; subsequent messages from the
+   * same sender in the same group always use the same bot.
+   * On first assignment, renames the bot to match the sender's role.
+   */
+  static async sendPoolMessage(
+    chatId: string,
+    text: string,
+    sender: string,
+    groupFolder: string,
+  ): Promise<void> {
+    if (TelegramChannel.poolApis.length === 0) {
+      // No pool bots — fall back to main bot (handled by caller)
+      return;
+    }
+
+    const key = `${groupFolder}:${sender}`;
+    let idx = TelegramChannel.senderBotMap.get(key);
+    if (idx === undefined) {
+      idx = TelegramChannel.nextPoolIndex % TelegramChannel.poolApis.length;
+      TelegramChannel.nextPoolIndex++;
+      TelegramChannel.senderBotMap.set(key, idx);
+      // Rename the bot to match the sender's role, then wait for Telegram to propagate
+      try {
+        await TelegramChannel.poolApis[idx].setMyName(sender);
+        await new Promise((r) => setTimeout(r, 2000));
+        logger.info({ sender, groupFolder, poolIndex: idx }, 'Assigned and renamed pool bot');
+      } catch (err) {
+        logger.warn({ sender, err }, 'Failed to rename pool bot (sending anyway)');
+      }
+    }
+
+    const api = TelegramChannel.poolApis[idx];
+    try {
+      const numericId = chatId.replace(/^tg:/, '');
+      const MAX_LENGTH = 4096;
+      if (text.length <= MAX_LENGTH) {
+        await api.sendMessage(numericId, text);
+      } else {
+        for (let i = 0; i < text.length; i += MAX_LENGTH) {
+          await api.sendMessage(numericId, text.slice(i, i + MAX_LENGTH));
+        }
+      }
+      logger.info({ chatId, sender, poolIndex: idx, length: text.length }, 'Pool message sent');
+    } catch (err) {
+      logger.error({ chatId, sender, err }, 'Failed to send pool message');
     }
   }
 
